@@ -141,19 +141,16 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			}
 
 			String comment = ds.getChangeSetTags().get("comment");
-			String noteLink = "";
-			for (Note note : solvedNotes) {
-				noteLink = getChangesetComment(note);
-				if (comment != null) {
-					comment = comment.replace("; " + noteLink, "");
-					comment = comment.replace(noteLink, "");
-					String compact = ChangeSetNoteTags.compactCloseSnippet(note.getId());
-					comment = comment.replace("; " + compact, "");
-					comment = comment.replace(compact, "");
-				}
-			}
 			List<Long> ids = rememberedNotes.stream().map(Note::getId).collect(Collectors.toList());
-			comment = ChangeSetNoteTags.mergeCommentWithNotes(comment, ids);
+			List<Long> solvedIds = solvedNotes.stream().map(Note::getId).collect(Collectors.toList());
+			comment = ChangeSetNoteTags.prepareUploadCommentTag(comment, ids, solvedIds, noteId -> {
+				for (Note note : solvedNotes) {
+					if (note.getId() == noteId) {
+						return getChangesetComment(note);
+					}
+				}
+				return ChangeSetNoteTags.compactCloseSnippet(noteId);
+			});
 			String closedNoteTag = ChangeSetNoteTags.closedNoteTag(ids);
 			ds.addChangeSetTag("created_by", "noteSolver_plugin/" + myPluginInformation.version);
 			ds.addChangeSetTag("comment", comment);
@@ -529,9 +526,10 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 	private String getChangesetComment(Note note) {
 		String retVal = String.format("Closes %s", getUrl(note, linkTypes.NOTE));
 		if (Config.getPref().get("noteSolver.overrideChangesetComment") != "") {
-			retVal = Config.getPref().get("noteSolver.overrideChangesetComment");
-			retVal = retVal.replace("##noteSolver:NID##", Long.toString(note.getId()));
-			retVal = retVal.replace("##noteSolver:LN##", getUrl(note, linkTypes.NOTE));
+			retVal = CommentTemplate.formatChangesetComment(
+					Config.getPref().get("noteSolver.overrideChangesetComment"),
+					note.getId(),
+					getUrl(note, linkTypes.NOTE));
 		} else {
 			if (Config.getPref().getBoolean("noteSolver.useLocalLanguageInChangeset")) {
 				retVal = I18n.tr("Closes {0}", getUrl(note, linkTypes.NOTE));
@@ -542,9 +540,10 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 	private String getNoteComment(Integer changesetID) {
 		String retVal = String.format("Resolved with changeset %s by noteSolver_plugin/%s", getUrl(changesetID, linkTypes.CHANGESET), myPluginInformation.version);
 		if (Config.getPref().get("noteSolver.overrideNoteComment") != "") {
-			retVal = Config.getPref().get("noteSolver.overrideNoteComment");
-			retVal = retVal.replace("##noteSolver:CID##", Integer.toString(changesetID));
-			retVal = retVal.replace("##noteSolver:LC##", getUrl(changesetID, linkTypes.CHANGESET));
+			retVal = CommentTemplate.formatNoteComment(
+					Config.getPref().get("noteSolver.overrideNoteComment"),
+					changesetID,
+					getUrl(changesetID, linkTypes.CHANGESET));
 		} else {
 			if (Config.getPref().getBoolean("noteSolver.useLocalLanguageInNote")) {
 				retVal = I18n.tr("Resolved with changeset {0} by noteSolver_plugin/{1}", getUrl(changesetID, linkTypes.CHANGESET), myPluginInformation.version);

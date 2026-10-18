@@ -3,6 +3,7 @@ package org.openstreetmap.josm.plugins.notesolver;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.function.LongFunction;
 
 import org.openstreetmap.josm.data.osm.Changeset;
 
@@ -61,6 +62,32 @@ public final class ChangeSetNoteTags {
 
 	public static String compactCloseSnippet(long noteId) {
 		return "Closes note/" + noteId;
+	}
+
+	/**
+	 * Strips prior noteSolver lines from the mapper comment, then merges close snippets for remembered notes.
+	 * {@code changesetLineForNote} must return final text (escapes and placeholders already expanded).
+	 */
+	public static String prepareUploadCommentTag(
+			String baseComment,
+			Collection<Long> rememberedNoteIds,
+			Collection<Long> solvedNoteIds,
+			LongFunction<String> changesetLineForNote) {
+		String comment = baseComment;
+		if (comment != null && solvedNoteIds != null && changesetLineForNote != null) {
+			for (Long id : solvedNoteIds) {
+				if (id == null) {
+					continue;
+				}
+				String noteLink = changesetLineForNote.apply(id);
+				comment = comment.replace("; " + noteLink, "");
+				comment = comment.replace(noteLink, "");
+				String compact = compactCloseSnippet(id);
+				comment = comment.replace("; " + compact, "");
+				comment = comment.replace(compact, "");
+			}
+		}
+		return mergeCommentWithNotes(comment, rememberedNoteIds);
 	}
 
 	/**

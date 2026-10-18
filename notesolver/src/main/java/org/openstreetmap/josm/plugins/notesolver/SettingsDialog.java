@@ -42,6 +42,7 @@ public class SettingsDialog {
 		box.add(new JLabel(I18n.tr("##noteSolver:CID## for the changeset number in the Note comment"))); 
 		box.add(new JLabel(I18n.tr("##noteSolver:LN## for a Link to the Note in the changeset comment")));
 		box.add(new JLabel(I18n.tr("##noteSolver:LC## for a Link to the changeset in the Note comment")));
+		box.add(new JLabel(I18n.tr("Use \\n in a template for a line break (also in the changeset comment field).")));
 		
 		settingsPanel.add(box);
 		final int result = 
