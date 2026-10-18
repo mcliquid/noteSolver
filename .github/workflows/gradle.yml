@@ -1,19 +1,29 @@
+
 name: Gradle
+
 on:
-  - push
-  - pull_request
+  push:
+  pull_request:
+  workflow_dispatch:
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: notesolver
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: '21'
           cache: gradle
+          cache-dependency-path: |
+            notesolver/**/*.gradle*
+            notesolver/gradle/wrapper/gradle-wrapper.properties
+
       - name: Build and test
         run: ./gradlew build --no-daemon
