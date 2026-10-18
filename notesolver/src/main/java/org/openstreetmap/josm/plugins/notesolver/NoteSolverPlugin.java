@@ -54,6 +54,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 	public Note selectedNote;
 
 	private final NoteClosePending closePending = new NoteClosePending();
+	private final RememberedNotesOverlay rememberedNotesOverlay = new RememberedNotesOverlay(() -> rememberedNotes);
 
 	NoteSolverPlugin me = this;
 	private PluginInformation myPluginInformation;
@@ -82,6 +83,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 
 	@Override
 	public void destroy() {
+		detachRememberedNotesOverlay(MainApplication.getMap());
 		UploadAction.unregisterUploadHook(earlyUploadHook);
 		UploadAction.unregisterUploadHook(lateUploadHook);
 		OsmServerWriter.unregisterPostprocessor(writePostprocessor);
@@ -116,6 +118,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 				}
 				for (Note note : solvedNotes)
 					if (rememberedNotes.containsNote(note)) rememberedNotes.remove(note);
+				refreshRememberedNotesOnMap();
 			}
 			if (rememberedNotes == null || rememberedNotes.size() == 0) {
 				return true;
@@ -247,6 +250,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			ds.getChangeSetTags().remove("closed:note");
 		}
 		updateMenu();
+		refreshRememberedNotesOnMap();
 	}
 
 	private final JosmAction settingsDialogMenu = new JosmAction() {
@@ -275,6 +279,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 					rememberedNotes.remove(selectedNote);
 			}
 			updateMenu();
+			refreshRememberedNotesOnMap();
 		}
 	};
 	private final JosmAction rememberNoteAction = new JosmAction() {
@@ -288,6 +293,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 					rememberedNotes.add(selectedNote);
 			}
 			updateMenu();
+			refreshRememberedNotesOnMap();
 		}
 	};
 	private final JosmAction openNoteAction = new JosmAction() {
@@ -434,6 +440,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 								public void actionPerformed(ActionEvent ev) {
 									rememberedNotes.remove(note);
 									updateMenu();
+									refreshRememberedNotesOnMap();
 								}
 							}, true
 						)
@@ -454,11 +461,24 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 
 	@Override
 	public void mapFrameInitialized(final MapFrame oldFrame, final MapFrame newFrame) {
-		if (newFrame == null)
+		detachRememberedNotesOverlay(oldFrame);
+		if (newFrame == null) {
 			setEnabledMenu(false);
-		else {
+		} else {
 			setEnabledMenu(true);
+			newFrame.mapView.addTemporaryLayer(rememberedNotesOverlay);
+			refreshRememberedNotesOnMap();
 		}
+	}
+
+	private void detachRememberedNotesOverlay(MapFrame frame) {
+		if (frame != null) {
+			frame.mapView.removeTemporaryLayer(rememberedNotesOverlay);
+		}
+	}
+
+	private void refreshRememberedNotesOnMap() {
+		rememberedNotesOverlay.invalidate();
 	}
 
 	private void setEnabledMenu(final boolean isEnabled) {
