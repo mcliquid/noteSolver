@@ -337,7 +337,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		}
 		@Override
 		public void noteDataUpdated(NoteData noteData) {
-			// nothing to do here
+			refreshRememberedNotesOnMap();
 		}
 	};
 
@@ -350,6 +350,9 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		@Override
 		public void layerRemoving(LayerRemoveEvent e) {
 			changeListeners(e.getRemovedLayer(), true);
+			if (e.getRemovedLayer() instanceof NoteLayer) {
+				refreshRememberedNotesOnMap();
+			}
 		}
 
 		@Override

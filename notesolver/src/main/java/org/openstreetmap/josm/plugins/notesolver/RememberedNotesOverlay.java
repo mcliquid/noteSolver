@@ -6,12 +6,16 @@ import java.awt.Graphics2D;
 import java.awt.Point;
 import java.awt.Stroke;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.function.Supplier;
 
 import org.openstreetmap.josm.data.Bounds;
 import org.openstreetmap.josm.data.notes.Note;
 import org.openstreetmap.josm.gui.MapView;
 import org.openstreetmap.josm.gui.layer.AbstractMapViewPaintable;
+import org.openstreetmap.josm.gui.layer.NoteLayer;
 import org.openstreetmap.josm.tools.ImageProvider;
 
 /**
@@ -44,8 +48,14 @@ public class RememberedNotesOverlay extends AbstractMapViewPaintable {
 		g.setStroke(new BasicStroke(RING_WIDTH));
 		g.setColor(RING_COLOR);
 
-		for (Note note : notesInClip(notes, bbox)) {
-			Point p = mv.getPoint(note.getLatLon());
+		List<NoteLayer> noteLayers = mv.getLayerManager().getLayersOfType(NoteLayer.class);
+		Set<Long> onMap = noteIdsOnVisibleLayers(noteLayers);
+		for (Note remembered : notesInClip(notes, bbox)) {
+			Note onLayer = findOnMap(remembered, onMap, noteLayers);
+			if (onLayer == null) {
+				continue;
+			}
+			Point p = mv.getPoint(onLayer.getLatLon());
 			int cx = p.x;
 			int cy = iconCenterY(p.y, iconH);
 			g.drawOval(cx - diameter / 2, cy - diameter / 2, diameter, diameter);
@@ -61,5 +71,37 @@ public class RememberedNotesOverlay extends AbstractMapViewPaintable {
 
 	static Iterable<Note> notesInClip(Collection<Note> notes, Bounds bbox) {
 		return () -> notes.stream().filter(n -> bbox.contains(n.getLatLon())).iterator();
+	}
+
+	static Set<Long> noteIdsOnVisibleLayers(Collection<NoteLayer> layers) {
+		Set<Long> ids = new HashSet<>();
+		for (NoteLayer layer : layers) {
+			if (!layer.isVisible()) {
+				continue;
+			}
+			for (Note n : layer.getNoteData().getNotes()) {
+				ids.add(n.getId());
+			}
+		}
+		return ids;
+	}
+
+	/** Layer note for drawing; remembered list is not modified. */
+	static Note findOnMap(Note remembered, Set<Long> idsOnVisibleLayers, Collection<NoteLayer> layers) {
+		if (remembered == null || !idsOnVisibleLayers.contains(remembered.getId())) {
+			return null;
+		}
+		long id = remembered.getId();
+		for (NoteLayer layer : layers) {
+			if (!layer.isVisible()) {
+				continue;
+			}
+			for (Note n : layer.getNoteData().getNotes()) {
+				if (n.getId() == id) {
+					return n;
+				}
+			}
+		}
+		return null;
 	}
 }
