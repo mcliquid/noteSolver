@@ -2,6 +2,9 @@ plugins {
   id("org.openstreetmap.josm").version("0.8.2")
 }
 
+group = "org.openstreetmap.josm.plugins"
+version = "0.6.0"
+
 repositories {
   mavenCentral()
 }
