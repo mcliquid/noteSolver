@@ -1,6 +1,7 @@
 package org.openstreetmap.josm.plugins.notesolver;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import org.junit.jupiter.api.Test;
 
@@ -72,6 +73,47 @@ class CommentTemplateTest {
 	@Test
 	void unknownEscapeSequenceLeftIntact() {
 		assertEquals("ok\\qthere", CommentTemplate.formatNoteComment("ok\\qthere", 1, CS_URL));
+	}
+
+	@Test
+	void defaultResolvedNoteCommentUsesBareIdAndPluginVersion() {
+		assertEquals(
+				"Resolved with changeset 190717183 by noteSolver_plugin/0.8.0",
+				CommentTemplate.defaultResolvedNoteComment(190717183, "0.8.0"));
+	}
+
+	@Test
+	void defaultResolvedNoteCommentDoesNotDuplicateChangesetWord() {
+		String text = CommentTemplate.defaultResolvedNoteComment(42, "0.8.0");
+		assertEquals(1, text.split("changeset", -1).length - 1);
+		assertFalse(text.contains("changeset/"));
+	}
+
+	@Test
+	void bareChangesetIdFromPlainId() {
+		assertEquals("190717183", CommentTemplate.bareChangesetId("190717183"));
+	}
+
+	@Test
+	void bareChangesetIdFromChangesetPath() {
+		assertEquals("190717183", CommentTemplate.bareChangesetId("changeset/190717183"));
+	}
+
+	@Test
+	void bareChangesetIdFromFullUrl() {
+		assertEquals("190717183",
+				CommentTemplate.bareChangesetId("https://www.openstreetmap.org/changeset/190717183"));
+	}
+
+	@Test
+	void customNoteTemplateKeepsCidAndLcPlaceholders() {
+		String out = CommentTemplate.formatNoteComment(
+				"Resolved with changeset ##noteSolver:CID## by noteSolver_plugin/0.8.0 (##noteSolver:LC##)",
+				190717183,
+				"https://www.openstreetmap.org/changeset/190717183");
+		assertEquals(
+				"Resolved with changeset 190717183 by noteSolver_plugin/0.8.0 (https://www.openstreetmap.org/changeset/190717183)",
+				out);
 	}
 
 	@Test

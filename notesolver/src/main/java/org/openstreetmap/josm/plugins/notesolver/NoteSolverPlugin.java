@@ -226,6 +226,10 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		pendingNotes = new NoteList();
 		ProgressMonitor pm = null;
 		for (Note note : toClose) {
+			// Avoid parallel close with an in-flight Manage-note upload for the same id.
+			if (NoteManageService.isInFlight(note.getId())) {
+				continue;
+			}
 			String cOnlineStatus = getOnlineNoteStatus(note.getId());
 			NoteData noteData = new NoteData(java.util.Collections.singleton(note));
 			String noteComment = getNoteComment(changesetId);
@@ -310,6 +314,98 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			updateMenu();
 		}
 	};
+	private final JosmAction manageNoteAction = new JosmAction() {
+		private static final long serialVersionUID = 1927873880648933882L;
+		@Override
+		public void actionPerformed(ActionEvent event) {
+			manageSelectedNote();
+		}
+	};
+
+	/**
+	 * Manual comment/close via JOSM {@link org.openstreetmap.josm.io.OsmApi} (blocking worker upload).
+	 * Does not arm or clear {@link NoteClosePending}. {@code rememberedNotes} is updated only after
+	 * a confirmed server close — never after local staging or {@link NoteManageService.Kind#STARTED}.
+	 */
+	void manageSelectedNote() {
+		if (selectedNote == null) {
+			JOptionPane.showMessageDialog(null, I18n.tr("No Note selected."));
+			return;
+		}
+		boolean closedLocally = selectedNote.getState() == State.CLOSED;
+		String online = getOnlineNoteStatus(selectedNote.getId());
+		boolean closedOnline = online != null && online.toLowerCase().trim().equals("closed");
+		if (closedLocally || closedOnline) {
+			JOptionPane.showMessageDialog(null, I18n.tr("Note {0} is already closed.", Long.toString(selectedNote.getId())));
+			return;
+		}
+		if ("failure".equals(online)) {
+			int cont = JOptionPane.showConfirmDialog(null,
+				I18n.tr("Could not check note status online. Continue with the local note state?"),
+				I18n.tr("Manage note"),
+				JOptionPane.YES_NO_OPTION,
+				JOptionPane.WARNING_MESSAGE);
+			if (cont != JOptionPane.YES_OPTION) {
+				return;
+			}
+		}
+
+		ManageNoteDialog.Decision decision = ManageNoteDialog.showDialog();
+		if (decision == null) {
+			return;
+		}
+
+		final Note note = selectedNote;
+		if (decision.close
+				&& closePending.phase() != NoteClosePending.Phase.IDLE
+				&& closePending.noteIds().contains(note.getId())) {
+			JOptionPane.showMessageDialog(null,
+				I18n.tr("This note is already queued for automatic closing after upload. Wait for that to finish, or forget the note first."));
+			return;
+		}
+
+		NoteManageService.Outcome started = NoteManageService.start(
+			note,
+			decision.comment,
+			decision.close,
+			false,
+			new NoteManageOsmUpload(),
+			outcome -> GuiHelper.runInEDT(() -> onManageNoteFinished(note, outcome)),
+			task -> MainApplication.worker.submit(task)
+		);
+
+		if (started.kind == NoteManageService.Kind.EMPTY) {
+			JOptionPane.showMessageDialog(null, I18n.tr("Please select a hashtag or enter a comment."));
+			return;
+		}
+		if (started.kind == NoteManageService.Kind.BUSY) {
+			JOptionPane.showMessageDialog(null, I18n.tr("A note update is already in progress."));
+			return;
+		}
+		if (started.kind == NoteManageService.Kind.ALREADY_CLOSED) {
+			JOptionPane.showMessageDialog(null, I18n.tr("Note {0} is already closed.", Long.toString(note.getId())));
+		}
+		// STARTED: no success UI and no remember change until onManageNoteFinished.
+	}
+
+	private void onManageNoteFinished(Note note, NoteManageService.Outcome outcome) {
+		if (outcome.kind == NoteManageService.Kind.ERROR) {
+			JOptionPane.showMessageDialog(null, I18n.tr("Could not update note:\n{0}", outcome.message));
+			updateMenu();
+			return;
+		}
+		if (outcome.kind == NoteManageService.Kind.CANCELLED) {
+			JOptionPane.showMessageDialog(null, I18n.tr("Note update was cancelled."));
+			updateMenu();
+			return;
+		}
+		if (NoteManageService.shouldForgetRemembered(outcome)
+				&& rememberedNotes != null && rememberedNotes.containsNote(note)) {
+			rememberedNotes.remove(note);
+			refreshRememberedNotesOnMap();
+		}
+		updateMenu();
+	}
 	private final NoteDataUpdateListener noteDataUpdateListener = new NoteDataUpdateListener() {
 		@Override
 		public void selectedNoteChanged(NoteData noteData) {
@@ -410,11 +506,19 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			boolean bEnaPre = selectedNote != null && rememberedNotes != null;
 			boolean bEnaLst = (bEnaPre && rememberedNotes.containsNote(selectedNote));
 			boolean bEnaCls = (bEnaPre && selectedNote.getState() == Note.State.CLOSED);
+			boolean bEnaMng = selectedNote != null && selectedNote.getState() == Note.State.OPEN;
 			returnList.add(
 				createMenuItem(
 					I18n.tr("Open in browser"),
 					I18n.tr("Try to open the Note on osm.org with the operating system's standard browser"),
 					openNoteAction, bEnaOpn
+				)
+			);
+			returnList.add(
+				createMenuItem(
+					I18n.tr("Manage note…"),
+					I18n.tr("Comment on or close the selected Note with an optional hashtag"),
+					manageNoteAction, bEnaMng
 				)
 			);
 			returnList.add(
@@ -561,16 +665,18 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		return retVal;
 	}
 	private String getNoteComment(Integer changesetID) {
-		String retVal = String.format("Resolved with changeset %s by noteSolver_plugin/%s", getUrl(changesetID, linkTypes.CHANGESET), myPluginInformation.version);
+		// Default uses bare id + PluginInformation.version (not getUrl → avoids "changeset changeset/N").
+		// Custom overrideNoteComment is left untouched; ##noteSolver:CID## / ##noteSolver:LC## still work.
+		String version = myPluginInformation != null ? myPluginInformation.version : "";
+		String retVal = CommentTemplate.defaultResolvedNoteComment(changesetID, version);
 		if (Config.getPref().get("noteSolver.overrideNoteComment") != "") {
 			retVal = CommentTemplate.formatNoteComment(
 					Config.getPref().get("noteSolver.overrideNoteComment"),
 					changesetID,
 					getUrl(changesetID, linkTypes.CHANGESET));
-		} else {
-			if (Config.getPref().getBoolean("noteSolver.useLocalLanguageInNote")) {
-				retVal = I18n.tr("Resolved with changeset {0} by noteSolver_plugin/{1}", getUrl(changesetID, linkTypes.CHANGESET), myPluginInformation.version);
-			}
+		} else if (Config.getPref().getBoolean("noteSolver.useLocalLanguageInNote")) {
+			retVal = I18n.tr("Resolved with changeset {0} by noteSolver_plugin/{1}",
+					Integer.toString(changesetID), version);
 		}
 		return retVal;
 	}
