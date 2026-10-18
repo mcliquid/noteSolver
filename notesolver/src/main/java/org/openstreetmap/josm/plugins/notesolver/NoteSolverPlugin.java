@@ -141,20 +141,20 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			}
 
 			String comment = ds.getChangeSetTags().get("comment");
-			String closedNoteTag = "";
 			String noteLink = "";
 			for (Note note : solvedNotes) {
 				noteLink = getChangesetComment(note);
 				if (comment != null) {
 					comment = comment.replace("; " + noteLink, "");
 					comment = comment.replace(noteLink, "");
+					String compact = ChangeSetNoteTags.compactCloseSnippet(note.getId());
+					comment = comment.replace("; " + compact, "");
+					comment = comment.replace(compact, "");
 				}
 			}
-			for (Note note : rememberedNotes) {
-				noteLink = getChangesetComment(note);
-				comment = (comment != null ? (comment.contains(noteLink) ? comment : comment + "; " + noteLink) : noteLink);
-				closedNoteTag = closedNoteTag + (closedNoteTag != "" ? ";" : "") + Long.toString(note.getId());
-			}
+			List<Long> ids = rememberedNotes.stream().map(Note::getId).collect(Collectors.toList());
+			comment = ChangeSetNoteTags.mergeCommentWithNotes(comment, ids);
+			String closedNoteTag = ChangeSetNoteTags.closedNoteTag(ids);
 			ds.addChangeSetTag("created_by", "noteSolver_plugin/" + myPluginInformation.version);
 			ds.addChangeSetTag("comment", comment);
 			if (closedNoteTag == "") {
@@ -163,7 +163,6 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 				ds.addChangeSetTag("closed:note", closedNoteTag);
 			}
 
-			List<Long> ids = rememberedNotes.stream().map(Note::getId).collect(Collectors.toList());
 			closePending.wantClose(ids);
 			return true;
 		}
@@ -483,7 +482,11 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			thisNumber = Integer.toUnsignedLong((Integer)inputObject);
 		}
 		if (thisNumber > 0L) {
-			returnValue = serverUrl + linkType.name().toLowerCase() + "/" + Long.toString(thisNumber);
+			if (linkType == linkTypes.NOTE && serverUrl.contains("openstreetmap.org")) {
+				returnValue = "https://osm.org/note/" + Long.toString(thisNumber);
+			} else {
+				returnValue = serverUrl + linkType.name().toLowerCase() + "/" + Long.toString(thisNumber);
+			}
 		}
 		return returnValue;
 	}
