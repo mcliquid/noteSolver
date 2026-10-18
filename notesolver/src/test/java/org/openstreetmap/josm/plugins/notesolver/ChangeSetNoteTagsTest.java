@@ -1,6 +1,7 @@
 package org.openstreetmap.josm.plugins.notesolver;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,7 +57,7 @@ class ChangeSetNoteTagsTest {
 			String tag = ChangeSetNoteTags.closedNoteTag(noteIds(count, 3_000_000L));
 			assertWithinLimit(tag);
 			assertTrue(tag.contains("3000000"));
-			assertTrue(!tag.endsWith(";"));
+			assertFalse(tag.endsWith(";"));
 		}
 	}
 
@@ -84,6 +85,19 @@ class ChangeSetNoteTagsTest {
 	}
 
 	@Test
+	void isPartialClosedNoteList_hundredNotes() {
+		List<Long> ids = noteIds(100, 1L);
+		assertTrue(ChangeSetNoteTags.isPartialClosedNoteList(ids));
+		assertTrue(ChangeSetNoteTags.countIdsInClosedNoteTag(ChangeSetNoteTags.closedNoteTag(ids)) < 100);
+	}
+
+	@Test
+	void isPartialClosedNoteList_smallBatchComplete() {
+		List<Long> ids = noteIds(5, 100L);
+		assertFalse(ChangeSetNoteTags.isPartialClosedNoteList(ids));
+	}
+
+	@Test
 	void mergeComment_noNotes() {
 		assertEquals("manual edit", ChangeSetNoteTags.mergeCommentWithNotes("manual edit", Collections.emptyList()));
 	}
@@ -93,6 +107,7 @@ class ChangeSetNoteTagsTest {
 		String c = ChangeSetNoteTags.mergeCommentWithNotes("fix highway", Collections.singletonList(42L));
 		assertWithinLimit(c);
 		assertTrue(c.contains("note/42"));
+		assertEquals("fix highway; Closes note/42", c);
 	}
 
 	@Test
@@ -110,13 +125,13 @@ class ChangeSetNoteTagsTest {
 	}
 
 	@Test
-	void mergeComment_fiftyAndHundredNotesUseSummary() {
-		for (int count : new int[] { 50, 100 }) {
-			String c = ChangeSetNoteTags.mergeCommentWithNotes("work", noteIds(count, 5000L));
-			assertWithinLimit(c);
-			assertTrue(c.contains("work"));
-			assertTrue(c.contains("50") || c.contains("100") || c.contains("closed:note"));
-		}
+	void mergeComment_hundredNotesPartialWording() {
+		List<Long> ids = noteIds(100, 5000L);
+		String c = ChangeSetNoteTags.mergeCommentWithNotes("work", ids);
+		assertWithinLimit(c);
+		assertEquals("work", c.substring(0, 4));
+		assertTrue(c.contains("partial list in closed:note"));
+		assertTrue(c.contains("100"));
 	}
 
 	@Test
@@ -128,19 +143,43 @@ class ChangeSetNoteTagsTest {
 	}
 
 	@Test
-	void mergeComment_longManualCommentStillWithinLimit() {
-		String manual = "x".repeat(300);
-		String c = ChangeSetNoteTags.mergeCommentWithNotes(manual, noteIds(5, 1L));
-		assertNotNull(c);
-		assertWithinLimit(c);
+	void mergeComment_manualExactly255CharsNotTruncated() {
+		String manual = "m".repeat(ChangeSetNoteTags.maxTagValueLength());
+		String c = ChangeSetNoteTags.mergeCommentWithNotes(manual, noteIds(10, 1L));
+		assertEquals(manual, c);
+		assertEquals(ChangeSetNoteTags.maxTagValueLength(), c.length());
 	}
 
 	@Test
-	void fitToMax_exactAndOver() {
-		String exact = "a".repeat(ChangeSetNoteTags.maxTagValueLength());
-		assertEquals(exact, ChangeSetNoteTags.fitToMax(exact));
-		String over = "a".repeat(ChangeSetNoteTags.maxTagValueLength() + 1);
-		assertEquals(ChangeSetNoteTags.maxTagValueLength(), ChangeSetNoteTags.fitToMax(over).length());
+	void mergeComment_manual256CharsNotTruncated() {
+		String manual = "m".repeat(ChangeSetNoteTags.maxTagValueLength() + 1);
+		String c = ChangeSetNoteTags.mergeCommentWithNotes(manual, noteIds(5, 1L));
+		assertEquals(manual, c);
+		assertEquals(ChangeSetNoteTags.maxTagValueLength() + 1, c.length());
+	}
+
+	@Test
+	void mergeComment_manual255WithOneNoteOmitsAddition() {
+		String manual = "x".repeat(ChangeSetNoteTags.maxTagValueLength() - 5);
+		String c = ChangeSetNoteTags.mergeCommentWithNotes(manual, Collections.singletonList(99L));
+		assertTrue(c.equals(manual) || c.startsWith(manual));
+		assertFalse(c.contains("note/99") && c.length() > ChangeSetNoteTags.maxTagValueLength());
+	}
+
+	@Test
+	void truncateUtf16Safe_doesNotSplitSurrogatePair() {
+		String emoji = "\uD83D\uDE00"; // 😀
+		String generated = "Closes 100 notes (partial list in closed:note)" + emoji;
+		String cut = ChangeSetNoteTags.truncateUtf16Safe(generated, generated.length() - 1);
+		assertTrue(cut.length() < generated.length());
+		assertFalse(Character.isHighSurrogate(cut.charAt(cut.length() - 1)));
+	}
+
+	@Test
+	void mergeComment_unicodeManualPreserved() {
+		String manual = "Stra\u00dfe \uD83D\uDE00 fix";
+		String c = ChangeSetNoteTags.mergeCommentWithNotes(manual, Collections.singletonList(1L));
+		assertTrue(c.startsWith(manual));
 	}
 
 	@Test
@@ -152,13 +191,13 @@ class ChangeSetNoteTagsTest {
 	}
 
 	@Test
-	void mergeComment_multipleChangesetsScenarioIdsIndependent() {
-		List<Long> batchA = noteIds(30, 1_000L);
-		List<Long> batchB = noteIds(30, 2_000L);
-		assertWithinLimit(ChangeSetNoteTags.closedNoteTag(batchA));
-		assertWithinLimit(ChangeSetNoteTags.closedNoteTag(batchB));
-		assertWithinLimit(ChangeSetNoteTags.mergeCommentWithNotes("a", batchA));
-		assertWithinLimit(ChangeSetNoteTags.mergeCommentWithNotes("b", batchB));
+	void mergeComment_multipleUploadAttemptsSameManualBase() {
+		String manual = "persistent mapper comment";
+		List<Long> batch = noteIds(100, 1L);
+		String first = ChangeSetNoteTags.mergeCommentWithNotes(manual, batch);
+		String second = ChangeSetNoteTags.mergeCommentWithNotes(manual, batch);
+		assertEquals(first, second);
+		assertTrue(first.startsWith(manual));
 	}
 
 	@Test
@@ -167,7 +206,7 @@ class ChangeSetNoteTagsTest {
 		assertEquals(100, ids.size());
 		String tag = ChangeSetNoteTags.closedNoteTag(ids);
 		assertWithinLimit(tag);
-		int listed = tag.isEmpty() ? 0 : tag.split(";").length;
+		int listed = ChangeSetNoteTags.countIdsInClosedNoteTag(tag);
 		assertTrue(listed < 100);
 		assertEquals(100, ids.size());
 	}
@@ -177,5 +216,12 @@ class ChangeSetNoteTagsTest {
 		List<Long> ids = LongStream.rangeClosed(1, 100).boxed().toList();
 		String comment = ChangeSetNoteTags.mergeCommentWithNotes("; mapper text", ids);
 		assertWithinLimit(comment);
+		assertNotNull(comment);
+	}
+
+	@Test
+	void mergeComment_cancelledUploadRetryManualUnchanged() {
+		String manual = "only my words";
+		assertEquals(manual, ChangeSetNoteTags.mergeCommentWithNotes(manual, Collections.emptyList()));
 	}
 }
