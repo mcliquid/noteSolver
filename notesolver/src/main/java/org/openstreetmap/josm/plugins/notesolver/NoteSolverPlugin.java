@@ -1,7 +1,9 @@
 package org.openstreetmap.josm.plugins.notesolver;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import org.openstreetmap.josm.actions.*;
 import org.openstreetmap.josm.actions.upload.*;
@@ -17,16 +19,19 @@ import org.openstreetmap.josm.gui.*;
 import org.openstreetmap.josm.gui.layer.*;
 import org.openstreetmap.josm.gui.layer.LayerManager.*;
 import org.openstreetmap.josm.gui.progress.ProgressMonitor;
+import org.openstreetmap.josm.gui.util.GuiHelper;
+
+import org.openstreetmap.josm.io.OsmServerWritePostprocessor;
+import org.openstreetmap.josm.io.OsmServerWriter;
 
 import org.openstreetmap.josm.plugins.*;
 import org.openstreetmap.josm.spi.preferences.Config;
 
+import org.openstreetmap.josm.tools.Destroyable;
 import org.openstreetmap.josm.tools.I18n;
 import org.openstreetmap.josm.tools.OpenBrowser;
 
 import java.awt.event.*;
-import java.beans.PropertyChangeEvent;
-import java.beans.PropertyChangeListener;
 import java.awt.*;
 import javax.swing.*;
 
@@ -41,14 +46,14 @@ import java.io.InputStream;
 import java.net.URL;
 import java.net.URLConnection;
 
-public class NoteSolverPlugin extends Plugin {
+public class NoteSolverPlugin extends Plugin implements Destroyable {
 	static JMenu noteSolverMenu;
 	public NoteList rememberedNotes = new NoteList();
 	private NoteList solvedNotes = new NoteList();
+	private NoteList pendingNotes = new NoteList();
 	public Note selectedNote;
-	private int lastChangeSet;
-	private boolean autoUploadDecision = false;
-	private int requiresUploadCount = 0;
+
+	private final NoteClosePending closePending = new NoteClosePending();
 
 	NoteSolverPlugin me = this;
 	private PluginInformation myPluginInformation;
@@ -56,14 +61,9 @@ public class NoteSolverPlugin extends Plugin {
 	public NoteSolverPlugin(final PluginInformation info) {
 		super(info);
 		myPluginInformation = info;
-		// Create Menu
 		createMenu();
 		updateMenu();
-		// Register Layer Change Listener for Note Selection and Dataset Change
-		// ...andFire... added so that the Plugin can be loaded at runtime and
-		// the event handlers get loaded anyway.
 		MainApplication.getLayerManager().addAndFireLayerChangeListener(layerChangeListener);
-		// Check if a Note is already selected when the plugin gets loaded.
 		if (
 			MainApplication.getLayerManager().getNoteLayer() != null
 			&&
@@ -74,16 +74,39 @@ public class NoteSolverPlugin extends Plugin {
 			selectedNote = MainApplication.getLayerManager().getNoteLayer().getNoteData().getSelectedNote();
 			updateMenu();
 		}
-		// Register Upload Hook
-		UploadAction.registerUploadHook(uploadHook, false);
+		UploadAction.registerUploadHook(earlyUploadHook, false);
+		UploadAction.registerUploadHook(lateUploadHook, true);
+		OsmServerWriter.registerPostprocessor(writePostprocessor);
+		ChangesetCache.getInstance().addChangesetCacheListener(changesetCacheListener);
 	}
 
-	private final UploadHook uploadHook = new UploadHook() {
+	@Override
+	public void destroy() {
+		UploadAction.unregisterUploadHook(earlyUploadHook);
+		UploadAction.unregisterUploadHook(lateUploadHook);
+		OsmServerWriter.unregisterPostprocessor(writePostprocessor);
+		ChangesetCache.getInstance().removeChangesetCacheListener(changesetCacheListener);
+		MainApplication.getLayerManager().removeLayerChangeListener(layerChangeListener);
+		closePending.clear();
+		pendingNotes = new NoteList();
+	}
+
+	private void removeNoteSolverTags(DataSet ds) {
+		if (ds == null) {
+			return;
+		}
+		ds.getChangeSetTags().remove("closed:note");
+	}
+
+	private final UploadHook earlyUploadHook = new UploadHook() {
 		@Override
 		public boolean checkUpload(APIDataSet apiDataSet) {
-			boolean returnValue = true;
-			MainApplication.getLayerManager().getEditDataSet().getChangeSetTags().remove("closed:note");
-			// check online status before asking whether to close notes
+			DataSet ds = MainApplication.getLayerManager().getEditDataSet();
+			// Abandoned Yes / armed upload without success must not linger (#16/#18).
+			closePending.resetIncomplete();
+			pendingNotes = new NoteList();
+			removeNoteSolverTags(ds);
+
 			if (rememberedNotes != null && rememberedNotes.size() > 0) {
 				for (Note note : rememberedNotes) {
 					String cOnlineStatus = getOnlineNoteStatus(note.getId());
@@ -94,54 +117,141 @@ public class NoteSolverPlugin extends Plugin {
 				for (Note note : solvedNotes)
 					if (rememberedNotes.containsNote(note)) rememberedNotes.remove(note);
 			}
-			if (rememberedNotes != null && rememberedNotes.size() > 0) {
+			if (rememberedNotes == null || rememberedNotes.size() == 0) {
+				return true;
+			}
 
-				StringBuilder noteList = new StringBuilder();
-				rememberedNotes.forEach((n) -> noteList.append("\n" + NoteText.noteShortText(n)));
+			StringBuilder noteList = new StringBuilder();
+			rememberedNotes.forEach((n) -> noteList.append("\n" + NoteText.noteShortText(n)));
 
-				int outVal = JOptionPane.showConfirmDialog(
-					null,
-					I18n.trn("Automatically resolve Note\n{0}?", "Automatically resolve Notes\n{0}?", rememberedNotes.size(), noteList),
-					null, 
-					JOptionPane.YES_NO_CANCEL_OPTION, 
-					JOptionPane.QUESTION_MESSAGE
-				);
-				if (outVal == JOptionPane.CANCEL_OPTION) {
-					returnValue = false;
-				} else {
-					autoUploadDecision = (outVal == JOptionPane.YES_OPTION);
-					if (autoUploadDecision) {
-						String comment = MainApplication.getLayerManager().getEditDataSet().getChangeSetTags().get("comment");
-						String closedNoteTag = "";
-						String noteLink = "";
-						for (Note note : solvedNotes) {
-							noteLink = getChangesetComment(note);
-							if (comment != null) {
-								comment = comment.replace("; " + noteLink, "");
-								comment = comment.replace(noteLink, "");
-							}
-						}
-						for (Note note : rememberedNotes) {
-							noteLink = getChangesetComment(note);
-							comment = (comment != null ? (comment.contains(noteLink) ? comment : comment + "; " + noteLink) : noteLink);
-							closedNoteTag = closedNoteTag + (closedNoteTag != "" ? ";" : "") + Long.toString(note.getId());
-						}
-						MainApplication.getLayerManager().getEditDataSet().addChangeSetTag("created_by", "noteSolver_plugin/" + myPluginInformation.version);
-						MainApplication.getLayerManager().getEditDataSet().addChangeSetTag("comment", comment);
-						if (closedNoteTag == "")
-						{
-							MainApplication.getLayerManager().getEditDataSet().getChangeSetTags().remove("closed:note");
-						} else 
-						{
-							MainApplication.getLayerManager().getEditDataSet().addChangeSetTag("closed:note", closedNoteTag);
-						}
-					}
-					returnValue = true;
+			int outVal = JOptionPane.showConfirmDialog(
+				null,
+				I18n.trn("Automatically resolve Note\n{0}?", "Automatically resolve Notes\n{0}?", rememberedNotes.size(), noteList),
+				null,
+				JOptionPane.YES_NO_CANCEL_OPTION,
+				JOptionPane.QUESTION_MESSAGE
+			);
+			if (outVal == JOptionPane.CANCEL_OPTION) {
+				closePending.decline();
+				return false;
+			}
+			if (outVal != JOptionPane.YES_OPTION) {
+				closePending.decline();
+				return true;
+			}
+
+			String comment = ds.getChangeSetTags().get("comment");
+			String closedNoteTag = "";
+			String noteLink = "";
+			for (Note note : solvedNotes) {
+				noteLink = getChangesetComment(note);
+				if (comment != null) {
+					comment = comment.replace("; " + noteLink, "");
+					comment = comment.replace(noteLink, "");
 				}
 			}
-			return returnValue;
+			for (Note note : rememberedNotes) {
+				noteLink = getChangesetComment(note);
+				comment = (comment != null ? (comment.contains(noteLink) ? comment : comment + "; " + noteLink) : noteLink);
+				closedNoteTag = closedNoteTag + (closedNoteTag != "" ? ";" : "") + Long.toString(note.getId());
+			}
+			ds.addChangeSetTag("created_by", "noteSolver_plugin/" + myPluginInformation.version);
+			ds.addChangeSetTag("comment", comment);
+			if (closedNoteTag == "") {
+				ds.getChangeSetTags().remove("closed:note");
+			} else {
+				ds.addChangeSetTag("closed:note", closedNoteTag);
+			}
+
+			List<Long> ids = rememberedNotes.stream().map(Note::getId).collect(Collectors.toList());
+			closePending.wantClose(ids);
+			return true;
 		}
 	};
+
+	private final UploadHook lateUploadHook = new UploadHook() {
+		@Override
+		public boolean checkUpload(APIDataSet apiDataSet) {
+			if (closePending.arm()) {
+				pendingNotes = new NoteList();
+				pendingNotes.addAll(rememberedNotes);
+			}
+			return true;
+		}
+	};
+
+	private final OsmServerWritePostprocessor writePostprocessor = (Collection<OsmPrimitive> uploaded, ProgressMonitor progress) -> {
+		if (uploaded == null || uploaded.isEmpty()) {
+			return;
+		}
+		List<Integer> ids = new ArrayList<>();
+		for (OsmPrimitive p : uploaded) {
+			ids.add(p.getChangesetId());
+		}
+		closePending.bindFromUploadedChangesetIds(ids);
+	};
+
+	private final ChangesetCacheListener changesetCacheListener = event -> {
+		for (Changeset cs : event.getAddedChangesets()) {
+			maybeCloseNotesForCacheChangeset(cs);
+		}
+		for (Changeset cs : event.getUpdatedChangesets()) {
+			maybeCloseNotesForCacheChangeset(cs);
+		}
+	};
+
+	private boolean isEditLayerClean() {
+		OsmDataLayer layer = MainApplication.getLayerManager().getEditLayer();
+		return layer == null || !layer.requiresUploadToServer();
+	}
+
+	private void maybeCloseNotesForCacheChangeset(Changeset cs) {
+		if (cs == null) {
+			return;
+		}
+		Integer changesetId = closePending.matchCacheEvent(cs.getId(), isEditLayerClean());
+		if (changesetId == null) {
+			return;
+		}
+		GuiHelper.runInEDT(() -> closePendingNotes(changesetId));
+	}
+
+	private void closePendingNotes(int changesetId) {
+		Integer matched = closePending.matchCacheEvent(changesetId, isEditLayerClean());
+		if (matched == null) {
+			return;
+		}
+		closePending.markClosed(changesetId);
+
+		NoteList toClose = pendingNotes;
+		pendingNotes = new NoteList();
+		ProgressMonitor pm = null;
+		for (Note note : toClose) {
+			String cOnlineStatus = getOnlineNoteStatus(note.getId());
+			NoteData noteData = new NoteData(java.util.Collections.singleton(note));
+			String noteComment = getNoteComment(changesetId);
+			if (note.getState() == State.OPEN && cOnlineStatus.toLowerCase().trim().equals("open")) {
+				try {
+					noteData.closeNote(note, noteComment);
+					UploadNotesTask uploadNotesTask = new UploadNotesTask();
+					uploadNotesTask.uploadNotes(noteData, pm);
+				} catch (Exception e) {
+					JOptionPane.showMessageDialog(null, I18n.tr("Upload Note exception:\n{0}", e.getMessage()));
+				}
+			} else {
+				JOptionPane.showMessageDialog(null, I18n.tr("Note {0} was already closed outside of JOSM", Long.toString(note.getId())));
+			}
+			solvedNotes.add(note);
+			if (rememberedNotes.containsNote(note)) {
+				rememberedNotes.remove(note);
+			}
+		}
+		DataSet ds = MainApplication.getLayerManager().getEditDataSet();
+		if (ds != null) {
+			ds.getChangeSetTags().remove("closed:note");
+		}
+		updateMenu();
+	}
 
 	private final JosmAction settingsDialogMenu = new JosmAction() {
 		private static final long serialVersionUID = 1927873880648933878L;
@@ -204,7 +314,7 @@ public class NoteSolverPlugin extends Plugin {
 			selectedNote = noteData.getSelectedNote();
 			if (selectedNote != null) {
 				JPopupMenu contextMenu = new JPopupMenu();
-				for (JMenuItem menuItem : mainMenuEntries(menuTypes.MAIN)) 
+				for (JMenuItem menuItem : mainMenuEntries(menuTypes.MAIN))
 					contextMenu.add(menuItem);
 				Dimension size = contextMenu.getPreferredSize();
 				MainFrame frame = MainApplication.getMainFrame();
@@ -212,11 +322,9 @@ public class NoteSolverPlugin extends Plugin {
 				if (p != null) {
 					Component c = MainApplication.getMainFrame().getComponentAt(p);
 					SwingUtilities.convertPointToScreen(p, frame);
-					JComponent jc = (JComponent)c;
-					if (c != null) {
+					if (c instanceof JComponent) {
+						JComponent jc = (JComponent) c;
 						contextMenu.setInvoker(c);
-						// Show menu slightly above the desired location; otherwise we clash with the
-						// note content shown in the map.
 						contextMenu.setLocation(p.x, p.y - size.height - 15);
 						jc.setComponentPopupMenu(contextMenu);
 						contextMenu.setEnabled(true);
@@ -248,15 +356,7 @@ public class NoteSolverPlugin extends Plugin {
 		}
 
 		public final void changeListeners(Layer layer, boolean isRemove) {
-			if (layer instanceof OsmDataLayer) {
-				DataSet ds = ((OsmDataLayer) layer).getDataSet();
-				if (!isRemove) {
-					ds.addDataSetListener(dataSetListener);
-					layer.addPropertyChangeListener(propertyChangeListener);
-				} else {
-					ds.removeDataSetListener(dataSetListener);
-				}
-			} else if (layer instanceof NoteLayer) {
+			if (layer instanceof NoteLayer) {
 				NoteData notes = ((NoteLayer) layer).getNoteData();
 				if (!isRemove) {
 					notes.addNoteDataUpdateListener(noteDataUpdateListener);
@@ -267,85 +367,12 @@ public class NoteSolverPlugin extends Plugin {
 		}
 	};
 
-	private final PropertyChangeListener propertyChangeListener = new PropertyChangeListener() {
-		@Override
-		public void propertyChange(PropertyChangeEvent e) {
-			if (e.getPropertyName().endsWith("OsmDataLayer.requiresUploadToServer")) {
-				requiresUploadCount += ((Boolean)e.getNewValue() ? 1 : -1);
-			}
-		}
-	};
-
-	private final DataSetListener dataSetListener = new DataSetListener() {
-		@Override
-		public void otherDatasetChange(AbstractDatasetChangedEvent event)
-		{
-			ProgressMonitor pm = null;
-			if (event.getType() == AbstractDatasetChangedEvent.DatasetEventType.CHANGESET_ID_CHANGED && autoUploadDecision) {				
-				lastChangeSet = ((ChangesetIdChangedEvent) event).getNewChangesetId();
-				if (requiresUploadCount > 0 && lastChangeSet > 0) {
-					for (Note note : rememberedNotes) {
-						String cOnlineStatus = getOnlineNoteStatus(note.getId());
-						NoteData noteData = new NoteData(java.util.Collections.singleton(note));
-						String noteComment = getNoteComment(lastChangeSet);
-						if (note.getState() == State.OPEN && cOnlineStatus.toLowerCase().trim().equals("open")) {
-							try {
-								noteData.closeNote(note, noteComment);
-								UploadNotesTask uploadNotesTask = new UploadNotesTask();
-								uploadNotesTask.uploadNotes(noteData, pm);
-							} catch (Exception e) {
-								JOptionPane.showMessageDialog(null, I18n.tr("Upload Note exception:\n{0}", e.getMessage()));
-							}
-						} else {
-							JOptionPane.showMessageDialog(null, I18n.tr("Note {0} was already closed outside of JOSM", Long.toString(note.getId())));
-						}
-						solvedNotes.add(note);
-					}
-					rememberedNotes = new NoteList();
-					event.getDataset().addChangeSetTag("comment", "");
-					event.getDataset().addChangeSetTag("closed:note", "");
-					updateMenu();
-					autoUploadDecision = false;
-					lastChangeSet = 0;
-				}
-			}
-		}
-
-		@Override
-		public void dataChanged(DataChangedEvent event) {
-		}
-
-		@Override
-		public void nodeMoved(NodeMovedEvent event) {
-		}
-
-		@Override
-		public void wayNodesChanged(WayNodesChangedEvent event) {
-		}
-
-		@Override
-		public void tagsChanged(TagsChangedEvent event) {
-		}
-
-		@Override
-		public void relationMembersChanged(RelationMembersChangedEvent event) {
-		}
-
-		@Override
-		public void primitivesRemoved(PrimitivesRemovedEvent event) {
-		}
-
-		@Override
-		public void primitivesAdded(PrimitivesAddedEvent event) {
-		}
-	};
-
 	private void createMenu() {
 		final MainMenu menu = MainApplication.getMenu();
 		if (noteSolverMenu == null) {
 			noteSolverMenu = menu.addMenu(
-				"Note Solver", 
-				"Note Solver", 
+				"Note Solver",
+				"Note Solver",
 				0,
 				menu.getDefaultMenuPos(),
 				"help"
@@ -376,7 +403,7 @@ public class NoteSolverPlugin extends Plugin {
 		if (menuType == menuTypes.MAIN) {
 			boolean bEnaOpn = selectedNote != null;
 			boolean bEnaPre = selectedNote != null && rememberedNotes != null;
-			boolean bEnaLst = (bEnaPre && rememberedNotes.contains(selectedNote));
+			boolean bEnaLst = (bEnaPre && rememberedNotes.containsNote(selectedNote));
 			boolean bEnaCls = (bEnaPre && selectedNote.getState() == Note.State.CLOSED);
 			returnList.add(
 				createMenuItem(
@@ -387,15 +414,15 @@ public class NoteSolverPlugin extends Plugin {
 			);
 			returnList.add(
 				createMenuItem(
-					I18n.tr("Remember Note"), 
-					I18n.tr("Add the selected Note to the list of Notes that should be automatically closed when uploading a changeset"), 
+					I18n.tr("Remember Note"),
+					I18n.tr("Add the selected Note to the list of Notes that should be automatically closed when uploading a changeset"),
 					rememberNoteAction, bEnaPre && !bEnaLst && !bEnaCls
 				)
 			);
 			returnList.add(
 				createMenuItem(
-					I18n.tr("Forget Note"), 
-					I18n.tr("Remove the selected Note from the list of Notes that should be automatically closed when uploading a changeset"), 
+					I18n.tr("Forget Note"),
+					I18n.tr("Remove the selected Note from the list of Notes that should be automatically closed when uploading a changeset"),
 					forgetNoteAction, bEnaPre && bEnaLst
 				)
 			);
@@ -404,7 +431,7 @@ public class NoteSolverPlugin extends Plugin {
 				for(Note note : rememberedNotes) {
 					returnList.add(
 						createMenuItem(
-							NoteText.noteShortText(note), 
+							NoteText.noteShortText(note),
 							(note.getFirstComment() != null ? note.getFirstComment().toString() : ""),
 							new ActionListener() {
 								@Override
@@ -427,12 +454,12 @@ public class NoteSolverPlugin extends Plugin {
 		menuItem.addActionListener(al);
 		menuItem.setEnabled(enabled);
 		return menuItem;
-	} 
+	}
 
 	@Override
 	public void mapFrameInitialized(final MapFrame oldFrame, final MapFrame newFrame) {
 		if (newFrame == null)
-			setEnabledMenu(false); 
+			setEnabledMenu(false);
 		else {
 			setEnabledMenu(true);
 		}
@@ -488,9 +515,9 @@ public class NoteSolverPlugin extends Plugin {
 
 	private static String getServerUrl() {
 		final String customServerUrl = Config.getPref().get("osm-server.url");
-		String serverUrl = 
-			(customServerUrl != null && customServerUrl != "" ? 
-			customServerUrl.replace(".org/api", ".org") : 
+		String serverUrl =
+			(customServerUrl != null && customServerUrl != "" ?
+			customServerUrl.replace(".org/api", ".org") :
 			"https://www.openstreetmap.org");
 		if (!serverUrl.endsWith("/")) serverUrl += "/";
 		return serverUrl;

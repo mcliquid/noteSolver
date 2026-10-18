@@ -15,8 +15,6 @@ import org.openstreetmap.josm.spi.preferences.Config;
 
 import org.openstreetmap.josm.tools.I18n;
 
-import org.openstreetmap.josm.*;
-
 public class SettingsDialog {
 	public static boolean showSettingsDialog() {
 		final JPanel settingsPanel = new JPanel();

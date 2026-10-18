@@ -2,6 +2,18 @@ plugins {
   id("org.openstreetmap.josm").version("0.8.2")
 }
 
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+}
+
+tasks.named<Test>("test") {
+  useJUnitPlatform()
+}
+
 josm {
   pluginName = "notesolver"
   josmCompileVersion = "18387"
