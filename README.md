@@ -20,9 +20,21 @@ If you want to contribute to this plugin, please read [CONTRIBUTING.md](/CONTRIB
 
 Translation of the plugin is done using [POEditor](https://poeditor.com/join/project/RggSp7leZr), so if you're feeling like contributing a translation for the very limited amount of strings (currently only 12), you're very much welcome to add another translated language. Thank you!
 
+## Build from source
+
+Requirements: **JDK 21**, network access (downloads JOSM compile artifact).
+
+```bash
+cd notesolver
+./gradlew clean test dist
+```
+
+Plugin JAR: `notesolver/build/dist/notesolver.jar`  
+(Windows: set `JAVA_HOME` to JDK 21 if the default Java is newer than Gradle 8 supports.)
+
 ## How to install this plugin manually
 
-Download [notesolver.jar](https://github.com/kmpoppe/noteSolver/releases/latest/download/notesolver.jar) and copy it to "plugins" inside the [user-data directory](https://josm.openstreetmap.de/wiki/Help/Preferences#JOSMpreferencedatacachedirectories).
+Download [notesolver.jar](https://github.com/kmpoppe/noteSolver/releases/latest/download/notesolver.jar) and copy it to "plugins" inside the [preference-data directory](https://josm.openstreetmap.de/wiki/Help/Preferences#JOSMpreferencedatacachedirectories).
 
 Afterwards, restart JOSM,  go to settings, Plug-Ins and enable "notesolver". Now you have to restart JOSM again.
 

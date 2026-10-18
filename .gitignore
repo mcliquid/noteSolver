@@ -5,6 +5,11 @@ notesolver/build/README
 notesolver/src/.vscode
 
 .idea/
+.vscode/
+*.iml
 notesolver/.gradle/
 notesolver/bin/
 notesolver/build/
+notesolver/META-INF/
+debug-*.log
+*.bak
