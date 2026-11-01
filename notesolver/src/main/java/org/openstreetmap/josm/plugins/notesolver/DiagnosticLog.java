@@ -95,8 +95,33 @@ public final class DiagnosticLog {
 	}
 
 	static void resetForTests() {
-		shutdownInternal();
+		shutdownActiveAndAwait();
 		active = NOOP;
+	}
+
+	private static void shutdownActiveAndAwait() {
+		DiagnosticLog prev = active;
+		active = NOOP;
+		if (prev == null || prev == NOOP || prev.writer == null) {
+			return;
+		}
+		try {
+			prev.writer.submit(() -> { }).get(5, TimeUnit.SECONDS);
+		} catch (Exception ignored) {
+			// best effort drain before shutdown
+		}
+		prev.writer.shutdown();
+		try {
+			if (!prev.writer.awaitTermination(10, TimeUnit.SECONDS)) {
+				prev.writer.shutdownNow();
+				prev.writer.awaitTermination(5, TimeUnit.SECONDS);
+			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			prev.writer.shutdownNow();
+		}
+		prev.currentDay = null;
+		prev.currentFile = null;
 	}
 
 	public Path getLogDirectory() {
@@ -294,13 +319,7 @@ public final class DiagnosticLog {
 	}
 
 	private static void shutdownInternal() {
-		DiagnosticLog prev = active;
-		active = NOOP;
-		if (prev != NOOP && prev.writer != null) {
-			prev.writer.shutdown();
-		}
-		prev.currentDay = null;
-		prev.currentFile = null;
+		shutdownActiveAndAwait();
 	}
 
 	private static final class PathSize {

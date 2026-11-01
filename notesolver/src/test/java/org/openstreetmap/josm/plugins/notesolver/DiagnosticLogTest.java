@@ -30,7 +30,10 @@ class DiagnosticLogTest {
 	}
 
 	@AfterEach
-	void tearDown() {
+	void tearDown() throws Exception {
+		if (DiagnosticLog.get().getLogDirectory() != null) {
+			DiagnosticLog.get().flushPendingWritesForTests();
+		}
 		DiagnosticLog.resetForTests();
 	}
 
