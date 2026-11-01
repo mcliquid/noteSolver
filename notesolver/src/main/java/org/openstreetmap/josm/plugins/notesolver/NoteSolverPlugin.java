@@ -14,6 +14,7 @@ import org.openstreetmap.josm.data.notes.Note.State;
 import org.openstreetmap.josm.data.osm.*;
 import org.openstreetmap.josm.data.osm.NoteData.*;
 import org.openstreetmap.josm.data.osm.event.*;
+import org.openstreetmap.josm.data.Version;
 
 import org.openstreetmap.josm.gui.*;
 import org.openstreetmap.josm.gui.layer.*;
@@ -33,6 +34,7 @@ import org.openstreetmap.josm.tools.OpenBrowser;
 
 import java.awt.event.*;
 import java.awt.*;
+import java.awt.Desktop;
 import javax.swing.*;
 
 import org.w3c.dom.Document;
@@ -55,6 +57,8 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 
 	private final NoteClosePending closePending = new NoteClosePending();
 	private final RememberedNotesOverlay rememberedNotesOverlay = new RememberedNotesOverlay(() -> rememberedNotes);
+	private String autoCloseCorrelationId;
+	private int autoCloseUploadsInFlight;
 
 	NoteSolverPlugin me = this;
 	private PluginInformation myPluginInformation;
@@ -79,6 +83,13 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		UploadAction.registerUploadHook(lateUploadHook, true);
 		OsmServerWriter.registerPostprocessor(writePostprocessor);
 		ChangesetCache.getInstance().addChangesetCacheListener(changesetCacheListener);
+		String josmVersion = "unknown";
+		try {
+			josmVersion = Version.getInstance().getVersionString();
+		} catch (RuntimeException ignored) {
+			// unit tests / headless
+		}
+		DiagnosticLog.start(info.version, josmVersion);
 	}
 
 	@Override
@@ -89,6 +100,12 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		OsmServerWriter.unregisterPostprocessor(writePostprocessor);
 		ChangesetCache.getInstance().removeChangesetCacheListener(changesetCacheListener);
 		MainApplication.getLayerManager().removeLayerChangeListener(layerChangeListener);
+		AutoCloseDiagnostics.pluginShutdown(closePending, rememberedNotes == null ? 0 : rememberedNotes.size(),
+				pendingNotes == null ? 0 : pendingNotes.size());
+		if (autoCloseUploadsInFlight > 0) {
+			DiagnosticLog.get().warn("pluginDestroy autoCloseUploadsInFlight=" + autoCloseUploadsInFlight);
+		}
+		DiagnosticLog.shutdown();
 		closePending.clear();
 		pendingNotes = new NoteList();
 	}
@@ -105,6 +122,9 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		public boolean checkUpload(APIDataSet apiDataSet) {
 			DataSet ds = MainApplication.getLayerManager().getEditDataSet();
 			// Abandoned Yes / armed upload without success must not linger (#16/#18).
+			if (closePending.phase() != NoteClosePending.Phase.IDLE) {
+				logAutoCloseCancelled("uploadRestartReset", closePending.noteIds());
+			}
 			closePending.resetIncomplete();
 			pendingNotes = new NoteList();
 			removeNoteSolverTags(ds);
@@ -135,10 +155,12 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 				JOptionPane.QUESTION_MESSAGE
 			);
 			if (outVal == JOptionPane.CANCEL_OPTION) {
+				logAutoCloseCancelled("uploadDialogCancel");
 				closePending.decline();
 				return false;
 			}
 			if (outVal != JOptionPane.YES_OPTION) {
+				logAutoCloseCancelled("uploadDialogNo");
 				closePending.decline();
 				return true;
 			}
@@ -164,6 +186,9 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			}
 
 			closePending.wantClose(ids);
+			autoCloseCorrelationId = AutoCloseDiagnostics.newCorrelationId();
+			AutoCloseDiagnostics.uploadDialog("REQUESTED", autoCloseCorrelationId, ids);
+			AutoCloseDiagnostics.pendingPhase(autoCloseCorrelationId, closePending.phase(), null);
 			return true;
 		}
 	};
@@ -172,6 +197,8 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		@Override
 		public boolean checkUpload(APIDataSet apiDataSet) {
 			if (closePending.arm()) {
+				AutoCloseDiagnostics.uploadDialog("STARTED", autoCloseCorrelationId, closePending.noteIds());
+				AutoCloseDiagnostics.pendingPhase(autoCloseCorrelationId, closePending.phase(), null);
 				pendingNotes = new NoteList();
 				pendingNotes.addAll(rememberedNotes);
 			}
@@ -188,6 +215,10 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			ids.add(p.getChangesetId());
 		}
 		closePending.bindFromUploadedChangesetIds(ids);
+		if (closePending.phase() == NoteClosePending.Phase.BOUND) {
+			AutoCloseDiagnostics.pendingPhase(autoCloseCorrelationId, closePending.phase(),
+					closePending.boundChangesetId());
+		}
 	};
 
 	private final ChangesetCacheListener changesetCacheListener = event -> {
@@ -212,7 +243,20 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		if (changesetId == null) {
 			return;
 		}
+		DiagnosticLog.get().info("autoClose correlationId=" + autoCloseCorrelationId + " changesetId=" + changesetId
+				+ " outcome=REQUESTED action=scheduleNoteCloseUpload");
 		GuiHelper.runInEDT(() -> closePendingNotes(changesetId));
+	}
+
+	private void logAutoCloseCancelled(String reason, java.util.Set<Long> noteIds) {
+		if (autoCloseCorrelationId != null) {
+			AutoCloseDiagnostics.uploadDialog("CANCELLED", autoCloseCorrelationId, noteIds);
+		}
+		DiagnosticLog.get().info("autoClose uploadAborted reason=" + reason);
+	}
+
+	private void logAutoCloseCancelled(String reason) {
+		logAutoCloseCancelled(reason, closePending.noteIds());
 	}
 
 	private void closePendingNotes(int changesetId) {
@@ -224,29 +268,41 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 
 		NoteList toClose = pendingNotes;
 		pendingNotes = new NoteList();
-		ProgressMonitor pm = null;
+		final String correlationId = autoCloseCorrelationId;
 		for (Note note : toClose) {
 			// Avoid parallel close with an in-flight Manage-note upload for the same id.
 			if (NoteManageService.isInFlight(note.getId())) {
+				AutoCloseDiagnostics.skipped(note.getId(), correlationId, "manageNoteInFlight");
 				continue;
 			}
 			String cOnlineStatus = getOnlineNoteStatus(note.getId());
-			NoteData noteData = new NoteData(java.util.Collections.singleton(note));
 			String noteComment = getNoteComment(changesetId);
 			if (note.getState() == State.OPEN && cOnlineStatus.toLowerCase().trim().equals("open")) {
-				try {
-					noteData.closeNote(note, noteComment);
-					UploadNotesTask uploadNotesTask = new UploadNotesTask();
-					uploadNotesTask.uploadNotes(noteData, pm);
-				} catch (Exception e) {
-					JOptionPane.showMessageDialog(null, I18n.tr("Upload Note exception:\n{0}", e.getMessage()));
-				}
+				AutoCloseDiagnostics.noteUpload(note.getId(), changesetId, correlationId, AutoCloseOutcome.STARTED, null);
+				autoCloseUploadsInFlight++;
+				final Note noteRef = note;
+				NoteAutoCloseUpload.uploadCloseAsync(noteRef, noteComment, NoteAutoCloseUpload.defaultApi(),
+						task -> MainApplication.worker.submit(task),
+						result -> {
+							synchronized (me) {
+								autoCloseUploadsInFlight--;
+							}
+							AutoCloseDiagnostics.noteUpload(noteRef.getId(), changesetId, correlationId,
+									result.outcome, result.detail);
+							if (result.outcome == AutoCloseOutcome.FAILED) {
+								GuiHelper.runInEDT(() -> JOptionPane.showMessageDialog(null,
+										I18n.tr("Upload Note exception:\n{0}", result.detail)));
+							}
+						});
 			} else {
-				JOptionPane.showMessageDialog(null, I18n.tr("Note {0} was already closed outside of JOSM", Long.toString(note.getId())));
+				AutoCloseDiagnostics.skipped(note.getId(), correlationId, "alreadyClosedOnlineOrLocal");
+				GuiHelper.runInEDT(() -> JOptionPane.showMessageDialog(null,
+						I18n.tr("Note {0} was already closed outside of JOSM", Long.toString(note.getId()))));
 			}
 			solvedNotes.add(note);
 			if (rememberedNotes.containsNote(note)) {
 				rememberedNotes.remove(note);
+				AutoCloseDiagnostics.rememberListChanged("autoCloseBatchRemove", note.getId());
 			}
 		}
 		DataSet ds = MainApplication.getLayerManager().getEditDataSet();
@@ -279,8 +335,10 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			if (selectedNote == null) {
 				JOptionPane.showMessageDialog(null, I18n.tr("No Note selected."));
 			} else {
-				if (rememberedNotes != null && rememberedNotes.containsNote(selectedNote))
+				if (rememberedNotes != null && rememberedNotes.containsNote(selectedNote)) {
 					rememberedNotes.remove(selectedNote);
+					AutoCloseDiagnostics.rememberListChanged("forget", selectedNote.getId());
+				}
 			}
 			updateMenu();
 			refreshRememberedNotesOnMap();
@@ -293,8 +351,10 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			if (selectedNote == null) {
 				JOptionPane.showMessageDialog(null, I18n.tr("No Note selected."));
 			} else {
-				if (rememberedNotes != null && !rememberedNotes.containsNote(selectedNote))
+				if (rememberedNotes != null && !rememberedNotes.containsNote(selectedNote)) {
 					rememberedNotes.add(selectedNote);
+					AutoCloseDiagnostics.rememberListChanged("remember", selectedNote.getId());
+				}
 			}
 			updateMenu();
 			refreshRememberedNotesOnMap();
@@ -496,7 +556,48 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 				noteSolverMenu.add(j);
 			noteSolverMenu.addSeparator();
 		}
+		noteSolverMenu.addSeparator();
+		noteSolverMenu.add(createOpenDiagnosticLogFolderItem());
+		noteSolverMenu.add(createVerboseDiagnosticsItem());
 		noteSolverMenu.add(createMenuItem(I18n.tr("About"), I18n.tr("About noteSolver Plugin"), aboutDialog, true));
+	}
+
+	private JMenuItem createOpenDiagnosticLogFolderItem() {
+		return createMenuItem(
+				I18n.tr("Open diagnostic log folder"),
+				I18n.tr("Open the folder where noteSolver stores persistent diagnostic logs"),
+				ev -> openDiagnosticLogFolder(),
+				true);
+	}
+
+	private JCheckBoxMenuItem createVerboseDiagnosticsItem() {
+		JCheckBoxMenuItem item = new JCheckBoxMenuItem(
+				I18n.tr("Enable verbose diagnostics"),
+				Config.getPref().getBoolean(DiagnosticLog.PREF_VERBOSE, false));
+		item.setToolTipText(I18n.tr("Log additional DEBUG detail to the diagnostic log file"));
+		item.addActionListener(ev -> Config.getPref().putBoolean(DiagnosticLog.PREF_VERBOSE, item.isSelected()));
+		return item;
+	}
+
+	private void openDiagnosticLogFolder() {
+		java.nio.file.Path dir = DiagnosticLog.get().getLogDirectory();
+		if (dir == null) {
+			JOptionPane.showMessageDialog(null, I18n.tr("Diagnostic logging is not active."));
+			return;
+		}
+		try {
+			java.io.File folder = dir.toFile();
+			if (!folder.exists()) {
+				folder.mkdirs();
+			}
+			if (Desktop.isDesktopSupported()) {
+				Desktop.getDesktop().open(folder);
+			} else {
+				JOptionPane.showMessageDialog(null, folder.getAbsolutePath());
+			}
+		} catch (Exception e) {
+			JOptionPane.showMessageDialog(null, I18n.tr("Could not open log folder:\n{0}", e.getMessage()));
+		}
 	}
 
 	private List<JMenuItem> mainMenuEntries(Enum<menuTypes> menuType) {
@@ -546,6 +647,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 								@Override
 								public void actionPerformed(ActionEvent ev) {
 									rememberedNotes.remove(note);
+									AutoCloseDiagnostics.rememberListChanged("forgetMenu", note.getId());
 									updateMenu();
 									refreshRememberedNotesOnMap();
 								}
