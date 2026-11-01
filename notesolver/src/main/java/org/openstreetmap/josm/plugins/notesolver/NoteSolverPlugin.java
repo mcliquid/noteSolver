@@ -57,8 +57,8 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 
 	private final NoteClosePending closePending = new NoteClosePending();
 	private final RememberedNotesOverlay rememberedNotesOverlay = new RememberedNotesOverlay(() -> rememberedNotes);
+	private final AutoCloseOrchestrator autoCloseOrchestrator = new AutoCloseOrchestrator();
 	private String autoCloseCorrelationId;
-	private int autoCloseUploadsInFlight;
 
 	NoteSolverPlugin me = this;
 	private PluginInformation myPluginInformation;
@@ -102,8 +102,10 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		MainApplication.getLayerManager().removeLayerChangeListener(layerChangeListener);
 		AutoCloseDiagnostics.pluginShutdown(closePending, rememberedNotes == null ? 0 : rememberedNotes.size(),
 				pendingNotes == null ? 0 : pendingNotes.size());
-		if (autoCloseUploadsInFlight > 0) {
-			DiagnosticLog.get().warn("pluginDestroy autoCloseUploadsInFlight=" + autoCloseUploadsInFlight);
+		autoCloseOrchestrator.onPluginDestroy();
+		if (autoCloseOrchestrator.hasAnyAutoCloseInFlight()) {
+			DiagnosticLog.get().warn("pluginDestroy autoCloseUploadsInFlight="
+					+ autoCloseOrchestrator.autoCloseUploadsInFlight());
 		}
 		DiagnosticLog.shutdown();
 		closePending.clear();
@@ -166,7 +168,10 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			}
 
 			String comment = ds.getChangeSetTags().get("comment");
-			List<Long> ids = rememberedNotes.stream().map(Note::getId).collect(Collectors.toList());
+			List<Long> ids = rememberedNotes.stream()
+					.map(Note::getId)
+					.filter(id -> !autoCloseOrchestrator.isAutoCloseInFlight(id))
+					.collect(Collectors.toList());
 			List<Long> solvedIds = solvedNotes.stream().map(Note::getId).collect(Collectors.toList());
 			comment = ChangeSetNoteTags.prepareUploadCommentTag(comment, ids, solvedIds, noteId -> {
 				for (Note note : solvedNotes) {
@@ -269,42 +274,61 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		NoteList toClose = pendingNotes;
 		pendingNotes = new NoteList();
 		final String correlationId = autoCloseCorrelationId;
-		for (Note note : toClose) {
-			// Avoid parallel close with an in-flight Manage-note upload for the same id.
-			if (NoteManageService.isInFlight(note.getId())) {
-				AutoCloseDiagnostics.skipped(note.getId(), correlationId, "manageNoteInFlight");
-				continue;
-			}
-			String cOnlineStatus = getOnlineNoteStatus(note.getId());
-			String noteComment = getNoteComment(changesetId);
-			if (note.getState() == State.OPEN && cOnlineStatus.toLowerCase().trim().equals("open")) {
-				AutoCloseDiagnostics.noteUpload(note.getId(), changesetId, correlationId, AutoCloseOutcome.STARTED, null);
-				autoCloseUploadsInFlight++;
-				final Note noteRef = note;
-				NoteAutoCloseUpload.uploadCloseAsync(noteRef, noteComment, NoteAutoCloseUpload.defaultApi(),
-						task -> MainApplication.worker.submit(task),
-						result -> {
-							synchronized (me) {
-								autoCloseUploadsInFlight--;
-							}
-							AutoCloseDiagnostics.noteUpload(noteRef.getId(), changesetId, correlationId,
-									result.outcome, result.detail);
-							if (result.outcome == AutoCloseOutcome.FAILED) {
-								GuiHelper.runInEDT(() -> JOptionPane.showMessageDialog(null,
-										I18n.tr("Upload Note exception:\n{0}", result.detail)));
-							}
+		autoCloseOrchestrator.closePendingNotes(toClose, changesetId, correlationId,
+				NoteAutoCloseUpload.defaultApi(),
+				task -> MainApplication.worker.submit(task),
+				new AutoCloseOrchestrator.RememberList() {
+					@Override
+					public boolean contains(Note note) {
+						return rememberedNotes != null && rememberedNotes.containsNote(note);
+					}
+
+					@Override
+					public void remove(Note note) {
+						if (rememberedNotes != null) {
+							rememberedNotes.remove(note);
+						}
+					}
+				},
+				new AutoCloseOrchestrator.Callbacks() {
+					@Override
+					public boolean isManageUploadInFlight(long noteId) {
+						return NoteManageService.isInFlight(noteId);
+					}
+
+					@Override
+					public boolean isCloseable(Note note) {
+						String cOnlineStatus = getOnlineNoteStatus(note.getId());
+						return note.getState() == State.OPEN
+								&& cOnlineStatus.toLowerCase().trim().equals("open");
+					}
+
+					@Override
+					public String noteComment(int csId) {
+						return getNoteComment(csId);
+					}
+
+					@Override
+					public void onFailedUi(long noteId, String detail) {
+						GuiHelper.runInEDT(() -> JOptionPane.showMessageDialog(null,
+								I18n.tr("Upload Note exception:\n{0}", detail)));
+					}
+
+					@Override
+					public void onAlreadyClosedUi(long noteId) {
+						GuiHelper.runInEDT(() -> JOptionPane.showMessageDialog(null,
+								I18n.tr("Note {0} was already closed outside of JOSM", Long.toString(noteId))));
+					}
+
+					@Override
+					public void refreshUi() {
+						GuiHelper.runInEDT(() -> {
+							updateMenu();
+							refreshRememberedNotesOnMap();
 						});
-			} else {
-				AutoCloseDiagnostics.skipped(note.getId(), correlationId, "alreadyClosedOnlineOrLocal");
-				GuiHelper.runInEDT(() -> JOptionPane.showMessageDialog(null,
-						I18n.tr("Note {0} was already closed outside of JOSM", Long.toString(note.getId()))));
-			}
-			solvedNotes.add(note);
-			if (rememberedNotes.containsNote(note)) {
-				rememberedNotes.remove(note);
-				AutoCloseDiagnostics.rememberListChanged("autoCloseBatchRemove", note.getId());
-			}
-		}
+					}
+				},
+				null);
 		DataSet ds = MainApplication.getLayerManager().getEditDataSet();
 		if (ds != null) {
 			ds.getChangeSetTags().remove("closed:note");
@@ -417,8 +441,9 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 
 		final Note note = selectedNote;
 		if (decision.close
-				&& closePending.phase() != NoteClosePending.Phase.IDLE
-				&& closePending.noteIds().contains(note.getId())) {
+				&& (closePending.phase() != NoteClosePending.Phase.IDLE
+						&& closePending.noteIds().contains(note.getId())
+						|| autoCloseOrchestrator.isAutoCloseInFlight(note.getId()))) {
 			JOptionPane.showMessageDialog(null,
 				I18n.tr("This note is already queued for automatic closing after upload. Wait for that to finish, or forget the note first."));
 			return;

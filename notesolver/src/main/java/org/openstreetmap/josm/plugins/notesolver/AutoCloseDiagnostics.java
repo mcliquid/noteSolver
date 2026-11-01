@@ -31,14 +31,28 @@ public final class AutoCloseDiagnostics {
 
 	public static void noteUpload(long noteId, int changesetId, String correlationId, AutoCloseOutcome outcome,
 			String detail) {
-		String level = outcome == AutoCloseOutcome.FAILED ? "ERROR" : "INFO";
 		String msg = "autoClose correlationId=" + correlationId + " noteId=" + noteId + " changesetId=" + changesetId
-				+ " outcome=" + outcome.name() + (detail == null || detail.isEmpty() ? "" : " detail=" + LogSanitizer.sanitize(detail));
-		if ("ERROR".equals(level)) {
+				+ " outcome=" + outcome.name() + formatDetail(detail);
+		if (outcome == AutoCloseOutcome.FAILED) {
 			DiagnosticLog.get().error(msg);
 		} else {
 			DiagnosticLog.get().info(msg);
 		}
+	}
+
+	public static void rememberRemoved(long noteId, int changesetId, String correlationId) {
+		DiagnosticLog.get().info("autoClose correlationId=" + correlationId + " noteId=" + noteId + " changesetId="
+				+ changesetId + " outcome=REMEMBER_REMOVED");
+	}
+
+	public static void rememberRetained(long noteId, int changesetId, String correlationId, AutoCloseOutcome reason,
+			String detail) {
+		DiagnosticLog.get().info("autoClose correlationId=" + correlationId + " noteId=" + noteId + " changesetId="
+				+ changesetId + " outcome=REMEMBER_RETAINED reason=" + reason.name() + formatDetail(detail));
+	}
+
+	private static String formatDetail(String detail) {
+		return detail == null || detail.isEmpty() ? "" : " detail=" + LogSanitizer.sanitize(detail);
 	}
 
 	public static void skipped(long noteId, String correlationId, String reason) {
