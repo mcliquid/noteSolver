@@ -46,9 +46,17 @@ public final class CommentTemplate {
 	}
 
 	public static String formatNoteComment(String template, int changesetId, String changesetUrl) {
+		return formatNoteComment(template, changesetId, changesetUrl, null);
+	}
+
+	public static String formatNoteComment(String template, int changesetId, String changesetUrl,
+			String pluginVersion) {
 		String retVal = expandEscapes(template);
 		retVal = retVal.replace("##noteSolver:CID##", Integer.toString(changesetId));
 		retVal = retVal.replace("##noteSolver:LC##", changesetUrl);
+		if (pluginVersion != null) {
+			retVal = retVal.replace("##noteSolver:VER##", pluginVersion);
+		}
 		return retVal;
 	}
 

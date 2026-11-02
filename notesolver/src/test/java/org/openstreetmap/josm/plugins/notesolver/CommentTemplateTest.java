@@ -108,9 +108,10 @@ class CommentTemplateTest {
 	@Test
 	void customNoteTemplateKeepsCidAndLcPlaceholders() {
 		String out = CommentTemplate.formatNoteComment(
-				"Resolved with changeset ##noteSolver:CID## by noteSolver_plugin/0.8.0 (##noteSolver:LC##)",
+				"Resolved with changeset ##noteSolver:CID## by noteSolver_plugin/##noteSolver:VER## (##noteSolver:LC##)",
 				190717183,
-				"https://www.openstreetmap.org/changeset/190717183");
+				"https://www.openstreetmap.org/changeset/190717183",
+				"0.8.0");
 		assertEquals(
 				"Resolved with changeset 190717183 by noteSolver_plugin/0.8.0 (https://www.openstreetmap.org/changeset/190717183)",
 				out);
