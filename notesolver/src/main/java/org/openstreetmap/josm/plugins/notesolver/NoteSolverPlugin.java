@@ -66,6 +66,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 	public NoteSolverPlugin(final PluginInformation info) {
 		super(info);
 		myPluginInformation = info;
+		NoteCommentText.migrateLegacyOverrideIfNeeded(Config.getPref(), info.version);
 		createMenu();
 		updateMenu();
 		MainApplication.getLayerManager().addAndFireLayerChangeListener(layerChangeListener);
@@ -792,20 +793,13 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		return retVal;
 	}
 	private String getNoteComment(Integer changesetID) {
-		// Default uses bare id + PluginInformation.version (not getUrl → avoids "changeset changeset/N").
-		// Custom overrideNoteComment is left untouched; ##noteSolver:CID## / ##noteSolver:LC## still work.
 		String version = myPluginInformation != null ? myPluginInformation.version : "";
-		String retVal = CommentTemplate.defaultResolvedNoteComment(changesetID, version);
-		if (Config.getPref().get("noteSolver.overrideNoteComment") != "") {
-			retVal = CommentTemplate.formatNoteComment(
-					Config.getPref().get("noteSolver.overrideNoteComment"),
-					changesetID,
-					getUrl(changesetID, linkTypes.CHANGESET));
-		} else if (Config.getPref().getBoolean("noteSolver.useLocalLanguageInNote")) {
-			retVal = I18n.tr("Resolved with changeset {0} by noteSolver_plugin/{1}",
-					Integer.toString(changesetID), version);
-		}
-		return retVal;
+		return NoteCommentText.resolve(
+				changesetID,
+				version,
+				Config.getPref().get(NoteCommentText.PREF_OVERRIDE, ""),
+				Config.getPref().getBoolean(NoteCommentText.PREF_USE_LOCAL_LANGUAGE, true),
+				getUrl(changesetID, linkTypes.CHANGESET));
 	}
 
 	private enum linkTypes {
