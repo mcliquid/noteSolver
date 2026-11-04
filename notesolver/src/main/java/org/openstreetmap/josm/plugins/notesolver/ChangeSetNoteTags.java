@@ -64,6 +64,112 @@ public final class ChangeSetNoteTags {
 		return "Closes note/" + noteId;
 	}
 
+	private static final java.util.regex.Pattern COMPACT_CLOSE_SNIPPET =
+			java.util.regex.Pattern.compile("Closes note/\\d+");
+
+	private static final java.util.regex.Pattern URL_CLOSE_SNIPPET =
+			java.util.regex.Pattern.compile("Closes https?://\\S+/note/\\d+");
+
+	/**
+	 * Removes {@code Closes note/<id>} (and URL variant) snippets whose note id is not in {@code keepNoteIds}.
+	 * Mapper text without noteSolver close lines is unchanged.
+	 */
+	public static String stripCloseSnippetsExcept(String comment, Collection<Long> keepNoteIds) {
+		return stripNoteCloseLineSegmentsExcept(comment, keepNoteIds);
+	}
+
+	/**
+	 * Drops semicolon-separated segments that look like noteSolver auto-close lines for notes not in
+	 * {@code keepNoteIds}. Handles compact {@code Closes note/id}, URL form, and localized {@code Erledigt mit …}.
+	 */
+	public static String stripNoteCloseLineSegmentsExcept(String comment, Collection<Long> keepNoteIds) {
+		if (comment == null || comment.isEmpty()) {
+			return comment;
+		}
+		java.util.Set<Long> keep = new java.util.HashSet<>();
+		if (keepNoteIds != null) {
+			for (Long id : keepNoteIds) {
+				if (id != null) {
+					keep.add(id);
+				}
+			}
+		}
+		String[] parts = comment.split("\\s*;\\s*");
+		StringBuilder out = new StringBuilder();
+		for (String part : parts) {
+			String segment = part.trim();
+			if (segment.isEmpty()) {
+				continue;
+			}
+			if (isAutoCloseCommentSegment(segment)) {
+				long noteId = parseNoteIdFromCloseSnippet(segment);
+				if (noteId >= 0 && !keep.contains(noteId)) {
+					continue;
+				}
+			}
+			if (out.length() > 0) {
+				out.append("; ");
+			}
+			out.append(segment);
+		}
+		return normalizeCommentSeparators(out.toString());
+	}
+
+	static boolean isAutoCloseCommentSegment(String segment) {
+		if (segment == null || segment.isEmpty()) {
+			return false;
+		}
+		String s = segment.trim();
+		if (!s.contains("note/")) {
+			return false;
+		}
+		if (COMPACT_CLOSE_SNIPPET.matcher(s).matches()) {
+			return true;
+		}
+		if (URL_CLOSE_SNIPPET.matcher(s).matches()) {
+			return true;
+		}
+		if (s.matches("(?i)^Erledigt mit\\s+.*note/\\d+.*")) {
+			return true;
+		}
+		return s.matches("(?i)^Closes\\s+.*note/\\d+.*");
+	}
+
+	static long parseNoteIdFromCloseSnippet(String snippet) {
+		java.util.regex.Matcher id = java.util.regex.Pattern.compile("note/(\\d+)").matcher(snippet);
+		if (id.find()) {
+			return Long.parseLong(id.group(1));
+		}
+		return -1L;
+	}
+
+	static String removeCloseSnippet(String comment, String snippet) {
+		if (comment == null || snippet == null || snippet.isEmpty()) {
+			return comment;
+		}
+		String result = comment.replace("; " + snippet, "");
+		result = result.replace(snippet, "");
+		return normalizeCommentSeparators(result);
+	}
+
+	static String normalizeCommentSeparators(String comment) {
+		if (comment == null) {
+			return null;
+		}
+		String result = comment.trim();
+		while (result.startsWith(";")) {
+			result = result.substring(1).trim();
+		}
+		while (result.contains(";;")) {
+			result = result.replace(";;", ";");
+		}
+		result = result.replace("; ;", "; ");
+		while (result.endsWith(";")) {
+			result = result.substring(0, result.length() - 1).trim();
+		}
+		return result;
+	}
+
 	/**
 	 * Strips prior noteSolver lines from the mapper comment, then merges close snippets for remembered notes.
 	 * {@code changesetLineForNote} must return final text (escapes and placeholders already expanded).
@@ -80,12 +186,12 @@ public final class ChangeSetNoteTags {
 					continue;
 				}
 				String noteLink = changesetLineForNote.apply(id);
-				comment = comment.replace("; " + noteLink, "");
-				comment = comment.replace(noteLink, "");
-				String compact = compactCloseSnippet(id);
-				comment = comment.replace("; " + compact, "");
-				comment = comment.replace(compact, "");
+				comment = removeCloseSnippet(comment, noteLink);
+				comment = removeCloseSnippet(comment, compactCloseSnippet(id));
 			}
+		}
+		if (comment != null && rememberedNoteIds != null) {
+			comment = stripCloseSnippetsExcept(comment, java.util.Collections.emptyList());
 		}
 		return mergeCommentWithNotes(comment, rememberedNoteIds);
 	}

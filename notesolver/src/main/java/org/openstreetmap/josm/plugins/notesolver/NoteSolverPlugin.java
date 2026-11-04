@@ -62,11 +62,13 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 
 	NoteSolverPlugin me = this;
 	private PluginInformation myPluginInformation;
+	private final String runtimePluginVersion;
 
 	public NoteSolverPlugin(final PluginInformation info) {
 		super(info);
 		myPluginInformation = info;
-		NoteCommentText.migrateLegacyOverrideIfNeeded(Config.getPref(), info.version);
+		runtimePluginVersion = PluginRuntimeVersion.resolve(info, NoteSolverPlugin.class);
+		NoteCommentText.migrateLegacyOverrideIfNeeded(Config.getPref(), runtimePluginVersion);
 		createMenu();
 		updateMenu();
 		MainApplication.getLayerManager().addAndFireLayerChangeListener(layerChangeListener);
@@ -90,7 +92,14 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		} catch (RuntimeException ignored) {
 			// unit tests / headless
 		}
-		DiagnosticLog.start(info.version, josmVersion);
+		DiagnosticLog.start(runtimePluginVersion, josmVersion);
+		if (info != null && info.version != null && !info.version.isEmpty()
+				&& !info.version.equals(runtimePluginVersion)) {
+			DiagnosticLog.get().warn("pluginVersion mismatch josmPluginInformation=" + info.version
+					+ " jarPluginVersion=" + runtimePluginVersion);
+		} else {
+			DiagnosticLog.get().info("pluginVersion resolved=" + runtimePluginVersion);
+		}
 	}
 
 	@Override
@@ -120,6 +129,51 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		ds.getChangeSetTags().remove("closed:note");
 	}
 
+	/** Updates the open changeset comment tag so JOSM upload preview matches remembered notes only. */
+	private void syncChangesetCommentPreview(DataSet ds) {
+		if (ds == null || rememberedNotes == null || rememberedNotes.isEmpty()) {
+			return;
+		}
+		List<Long> ids = rememberedNotes.stream().map(Note::getId).collect(Collectors.toList());
+		String comment = ds.getChangeSetTags().get("comment");
+		comment = ChangeSetNoteTags.stripNoteCloseLineSegmentsExcept(comment, ids);
+		comment = ChangeSetNoteTags.mergeCommentWithNotes(comment, ids);
+		applyCommentTag(ds, comment);
+	}
+
+	private static void applyCommentTag(DataSet ds, String comment) {
+		if (comment == null || comment.trim().isEmpty()) {
+			ds.getChangeSetTags().remove("comment");
+		} else {
+			ds.addChangeSetTag("comment", comment);
+		}
+	}
+
+	private void applyAutoCloseChangesetTags(DataSet ds, List<Long> ids) {
+		if (ds == null || ids == null || ids.isEmpty()) {
+			return;
+		}
+		String comment = ds.getChangeSetTags().get("comment");
+		List<Long> solvedIds = solvedNotes.stream().map(Note::getId).collect(Collectors.toList());
+		comment = ChangeSetNoteTags.prepareUploadCommentTag(comment, ids, solvedIds, noteId -> {
+			for (Note note : solvedNotes) {
+				if (note.getId() == noteId) {
+					return getChangesetComment(note);
+				}
+			}
+			return ChangeSetNoteTags.compactCloseSnippet(noteId);
+		});
+		String closedNoteTag = ChangeSetNoteTags.closedNoteTag(ids);
+		ds.addChangeSetTag("created_by", "noteSolver_plugin/" + runtimePluginVersion);
+		DiagnosticLog.get().info("changesetTag created_by noteSolver_plugin/" + runtimePluginVersion);
+		applyCommentTag(ds, comment);
+		if (closedNoteTag.isEmpty()) {
+			ds.getChangeSetTags().remove("closed:note");
+		} else {
+			ds.addChangeSetTag("closed:note", closedNoteTag);
+		}
+	}
+
 	private final UploadHook earlyUploadHook = new UploadHook() {
 		@Override
 		public boolean checkUpload(APIDataSet apiDataSet) {
@@ -130,6 +184,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 			}
 			closePending.resetIncomplete();
 			pendingNotes = new NoteList();
+			solvedNotes = new NoteList();
 			removeNoteSolverTags(ds);
 
 			if (rememberedNotes != null && rememberedNotes.size() > 0) {
@@ -142,6 +197,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 				for (Note note : solvedNotes)
 					if (rememberedNotes.containsNote(note)) rememberedNotes.remove(note);
 				refreshRememberedNotesOnMap();
+				syncChangesetCommentPreview(ds);
 			}
 			if (rememberedNotes == null || rememberedNotes.size() == 0) {
 				return true;
@@ -168,28 +224,11 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 				return true;
 			}
 
-			String comment = ds.getChangeSetTags().get("comment");
 			List<Long> ids = rememberedNotes.stream()
 					.map(Note::getId)
 					.filter(id -> !autoCloseOrchestrator.isAutoCloseInFlight(id))
 					.collect(Collectors.toList());
-			List<Long> solvedIds = solvedNotes.stream().map(Note::getId).collect(Collectors.toList());
-			comment = ChangeSetNoteTags.prepareUploadCommentTag(comment, ids, solvedIds, noteId -> {
-				for (Note note : solvedNotes) {
-					if (note.getId() == noteId) {
-						return getChangesetComment(note);
-					}
-				}
-				return ChangeSetNoteTags.compactCloseSnippet(noteId);
-			});
-			String closedNoteTag = ChangeSetNoteTags.closedNoteTag(ids);
-			ds.addChangeSetTag("created_by", "noteSolver_plugin/" + myPluginInformation.version);
-			ds.addChangeSetTag("comment", comment);
-			if (closedNoteTag == "") {
-				ds.getChangeSetTags().remove("closed:note");
-			} else {
-				ds.addChangeSetTag("closed:note", closedNoteTag);
-			}
+			applyAutoCloseChangesetTags(ds, ids);
 
 			closePending.wantClose(ids);
 			autoCloseCorrelationId = AutoCloseDiagnostics.newCorrelationId();
@@ -203,6 +242,10 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		@Override
 		public boolean checkUpload(APIDataSet apiDataSet) {
 			if (closePending.arm()) {
+				DataSet ds = MainApplication.getLayerManager().getEditDataSet();
+				List<Long> ids = new ArrayList<>(closePending.noteIds());
+				applyAutoCloseChangesetTags(ds, ids);
+				DiagnosticLog.get().info("changesetTag commentRefreshed lateHook noteCount=" + ids.size());
 				AutoCloseDiagnostics.uploadDialog("STARTED", autoCloseCorrelationId, closePending.noteIds());
 				AutoCloseDiagnostics.pendingPhase(autoCloseCorrelationId, closePending.phase(), null);
 				pendingNotes = new NoteList();
@@ -793,7 +836,7 @@ public class NoteSolverPlugin extends Plugin implements Destroyable {
 		return retVal;
 	}
 	private String getNoteComment(Integer changesetID) {
-		String version = myPluginInformation != null ? myPluginInformation.version : "";
+		String version = runtimePluginVersion;
 		return NoteCommentText.resolve(
 				changesetID,
 				version,

@@ -220,6 +220,39 @@ class ChangeSetNoteTagsTest {
 	}
 
 	@Test
+	void stripCloseSnippetsExcept_removesStaleNotesFromPreviousUpload() {
+		String stale = "Closes note/5123591; Closes note/5481661; Closes note/5481666";
+		String cleaned = ChangeSetNoteTags.stripCloseSnippetsExcept(stale,
+				java.util.Collections.singletonList(5481666L));
+		assertEquals("Closes note/5481666", cleaned);
+	}
+
+	@Test
+	void prepareUploadCommentTag_dropsClosedNotesNotRememberedThisUpload() {
+		String base = "Closes note/5123591; Closes note/5481661; Closes note/5481666";
+		String out = ChangeSetNoteTags.prepareUploadCommentTag(
+				base,
+				java.util.Collections.singletonList(5481666L),
+				java.util.Collections.emptyList(),
+				id -> ChangeSetNoteTags.compactCloseSnippet(id));
+		assertEquals("Closes note/5481666", out);
+	}
+
+	@Test
+	void stripNoteCloseLineSegmentsExcept_removesGermanCloseLine() {
+		String comment = "Kartierung; Erledigt mit https://www.openstreetmap.org/note/5123591; Closes note/5481666";
+		assertEquals("Kartierung; Closes note/5481666",
+				ChangeSetNoteTags.stripNoteCloseLineSegmentsExcept(comment,
+						java.util.Collections.singletonList(5481666L)));
+	}
+
+	@Test
+	void stripCloseSnippetsExcept_removesUrlForm() {
+		String comment = "fix; Closes https://www.openstreetmap.org/note/99";
+		assertEquals("fix", ChangeSetNoteTags.stripCloseSnippetsExcept(comment, java.util.Collections.emptyList()));
+	}
+
+	@Test
 	void mergeComment_cancelledUploadRetryManualUnchanged() {
 		String manual = "only my words";
 		assertEquals(manual, ChangeSetNoteTags.mergeCommentWithNotes(manual, Collections.emptyList()));
